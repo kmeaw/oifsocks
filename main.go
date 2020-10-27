@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net"
@@ -61,6 +62,44 @@ func OnAccept(ctx *httpproxy.Context, w http.ResponseWriter,
 	return false
 }
 
+func OnConnect(ctx *httpproxy.Context, host string) (httpproxy.ConnectAction, string) {
+	log.Printf("HTTP CONNECT %s", host)
+	l, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		log.Printf("cannot listen localhost:0: %s", err)
+		return httpproxy.ConnectProxy, ""
+	}
+	go func() {
+		defer l.Close()
+		conn2, err := DialFunc(context.Background(), "tcp", host)
+		if err != nil {
+			log.Printf("cannot dial %q: %s", host, err)
+			return
+		}
+		conn, err := l.Accept()
+		if err != nil {
+			log.Printf("cannot accept loopback connection: %s", err)
+			return
+		}
+		if _, _, err := net.SplitHostPort(host); nil == err {
+			host = host + ":80"
+		}
+		g := &errgroup.Group{}
+		g.Go(func() error {
+			_, err := io.Copy(conn, conn2)
+			return err
+		})
+		g.Go(func() error {
+			_, err := io.Copy(conn2, conn)
+			return err
+		})
+		g.Wait()
+		conn.Close()
+		conn2.Close()
+	}()
+	return httpproxy.ConnectProxy, l.Addr().String()
+}
+
 func main() {
 	conf := &socks5.Config{
 		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -83,6 +122,7 @@ func main() {
 	}
 	http_proxy.OnError = OnError
 	http_proxy.OnAccept = OnAccept
+	http_proxy.OnConnect = OnConnect
 
 	g := &errgroup.Group{}
 	g.Go(func() error { return socks_server.ListenAndServe("tcp", fmt.Sprintf("127.0.0.1:%d", socks_port)) })
